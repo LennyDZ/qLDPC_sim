@@ -1,0 +1,21 @@
+[project]
+name = "qldpc-sim"
+version = "0.1.0"
+description = "Package to generate Stim codes for qLDPC surgery."
+readme = "README.md"
+authors = [
+    { name = "lenny@delzio.ch", email = "lenny.delzio@epfl.ch" }
+]
+requires-python = ">=3.12"
+dependencies = ["pydantic>=2.0", "numpy>=1.24", "scipy>=1.10"]
+
+[project.optional-dependencies]
+test = ["pytest>=7.0", "pytest-cov>=4.0"]
+dev = ["pytest>=7.0", "pytest-cov>=4.0", "black>=23.0", "ruff>=0.1.0"]
+
+[project.scripts]
+qldpc-sim = "qldpc_sim:main"
+
+[build-system]
+requires = ["uv_build>=0.9.26,<0.10.0"]
+build-backend = "uv_build"

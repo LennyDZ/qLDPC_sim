@@ -1,0 +1,7 @@
+# Pytest and coverage
+__pycache__/
+.pytest_cache/
+.coverage
+htmlcov/
+.hypothesis/
+*.egg-info/
