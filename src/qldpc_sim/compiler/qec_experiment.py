@@ -2,12 +2,12 @@ from itertools import chain
 from typing import List, Set, Tuple, Union
 from pydantic import BaseModel, Field
 
-from src.qldpc_sim.compiler.pauli_measurement import PauliMeasurement
-from src.qldpc_sim.compiler.syndrome_extraction_round import (
-    SyndromeExtractionRound,
+from .pauli_measurement import PauliMeasurement
+from .syndrome_extraction_rounds import (
     SyndromeExtractionRounds,
 )
-from src.qldpc_sim.qec_objects.experiment_weight import ExperimentWeight
+from ..codes import StabiliserCode
+from ..qec_objects import ExperimentWeight
 
 
 class QECExperiment(BaseModel):
@@ -59,15 +59,15 @@ class QECExperiment(BaseModel):
         def __init__(self, name: str, qubit_resource: int, distance: int) -> None:
             self.name = name
             self.codes = []
-            self.logicals = Set()
+            self.logicals = []
             self.actions = []
-            self.available_qubits = qubit_resource
-
-            return self
+            self.distance = distance
+            self.qubit_resource = qubit_resource
+            self.available_qubits_count = len(qubit_resource)
 
         def add_code(self, code) -> "QECExperiment.QECExpBuilder":
-            self.experiment.codes.append(code)
-            self.available_qubits -= code.n
+            self.codes.append(code)
+            self.available_qubits_count -= code.num_qubits
             self.logicals.extend(code.logical_operators)
             return self
 
@@ -78,7 +78,7 @@ class QECExperiment(BaseModel):
                 raise ValueError(
                     f"Targeted logical operators in action {action.name} are not part of the experiment"
                 )
-            if action.ancilla_required() > self.available_qubits:
+            if action.ancilla_required() > self.available_qubits_count:
                 raise ValueError(
                     f"Not enough ancilla qubits available for action {action.name}"
                 )
@@ -90,7 +90,7 @@ class QECExperiment(BaseModel):
             return self
 
         def add_code_syndrome_extraction_rounds(
-            self, code: Union[Code, List[Code]], rounds: int
+            self, code: Union[StabiliserCode, List[StabiliserCode]], rounds: int
         ) -> "QECExperiment.QECExpBuilder":
             if isinstance(code, list):
                 for c in code:
@@ -123,9 +123,9 @@ class QECExperiment(BaseModel):
             )
             self.actions.append(
                 SyndromeExtractionRounds(
-                    "extract global syndrome",
-                    stabilisers_to_measure,
-                    rounds,
+                    name="extract global syndrome",
+                    stabilisers=stabilisers_to_measure,
+                    number_of_rounds=rounds,
                 )
             )
             return self
@@ -133,7 +133,7 @@ class QECExperiment(BaseModel):
         def build(self) -> "QECExperiment":
             return QECExperiment(
                 name=self.name,
-                qubit_resource=self.available_qubits,
+                qubit_resource=5,
                 distance=self.distance,
                 actions=self.actions,
             )

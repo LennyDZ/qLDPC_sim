@@ -11,7 +11,7 @@ class BitResource(BaseModel):
     """
 
     name: str
-    idx: str
+    idx: int
     id: UUID = Field(default_factory=uuid4)
 
 

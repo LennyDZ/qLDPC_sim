@@ -14,8 +14,9 @@ class LogicalOperator(PauliOperator):
     """
 
     name: str = Field(description="Name of the logical operator")
-    frame_tracking: Tuple[int, int] = Field(
-        description="Frame tracking information for the logical operator"
+    frame_tracking: Tuple[bool, bool] = Field(
+        description="Frame tracking information for the logical operator",
+        default=(False, False),
     )
 
     qubits: List[QuantumBit] = Field(

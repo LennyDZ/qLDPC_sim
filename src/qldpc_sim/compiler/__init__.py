@@ -1,3 +1,3 @@
 from .pauli_measurement import PauliMeasurement
 from .qec_experiment import QECExperiment
-from .syndrome_extraction_round import SyndromeExtractionRound
+from .syndrome_extraction_rounds import SyndromeExtractionRounds

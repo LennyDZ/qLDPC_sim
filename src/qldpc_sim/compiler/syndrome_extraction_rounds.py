@@ -2,9 +2,7 @@ from typing import List, Optional, Tuple
 from uuid import UUID, uuid4
 from pydantic import BaseModel, Field
 
-from src.qldpc_sim.qec_objects.experiment_weight import ExperimentWeight
-
-from ..qec_objects import Stabiliser
+from ..qec_objects import Stabiliser, ExperimentWeight
 
 
 class SyndromeExtractionRounds(BaseModel):
@@ -38,11 +36,11 @@ class SyndromeExtractionRounds(BaseModel):
         stim_instructions = []
 
         for s in self.stabilisers:
-            stab_meas, smw = s.compile_measurement()
+            stab_meas, smw = s.compiled_stim_circuit
             single_round_weight += smw
             stim_instructions.extend(stab_meas)
 
-        single_round = (stim_instructions,)
+        single_round = stim_instructions
 
         total_weight = ExperimentWeight()
         final_stim_instructions = []
