@@ -92,7 +92,7 @@ class SurgeMeasurement(PauliMeasurement):
             stack = [bot]
             p = bot
             pc = None
-            for i in range(1, self.distance - 1):
+            for i in range(1, self.distance):
                 nc = [
                     check for check in v.index_by_variable[p] if check.check_node != pc
                 ][0].check_node
@@ -139,7 +139,6 @@ class SurgeMeasurement(PauliMeasurement):
                 gates=var_node_initial_state.pauli_from_zero(),
             ),
         ]
-
         observable_nodes = {
             "XX_outcome": set(
                 [n for n in bridge_tanner.check_nodes if n.check_type == check_type]
