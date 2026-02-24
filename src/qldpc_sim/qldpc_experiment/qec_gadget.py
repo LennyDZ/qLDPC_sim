@@ -80,14 +80,19 @@ class InitializeCode(CodeGadget):
                 raise ValueError(
                     "Init only supported for |0> state for codes with multiple logical qubits."
                 )
-        compilers = [
-            ApplyGates(
-                target_nodes=self.code.tanner_graph.variable_nodes
-                | self.code.tanner_graph.check_nodes,
-                gates=self.initial_state.pauli_from_zero(),
-                tag=f"Init_{self.tag}_reset",
+        compilers = []
+        if (
+            self.initial_state == PauliEigenState.X_plus
+            or self.initial_state == PauliEigenState.X_minus
+        ):
+            compilers.append(
+                ApplyGates(
+                    target_nodes=self.code.tanner_graph.variable_nodes,
+                    gates=["H"],
+                    tag=f"Init_{self.tag}_logical_pauli",
+                )
             )
-        ]
+
         stabiliser = StabilisersMeasurementCompiler(
             data=self.code.tanner_graph,
             round=1,
@@ -105,8 +110,25 @@ class InitializeCode(CodeGadget):
                 },
             },
         )
-
         compilers.append(stabiliser)
+
+        match self.initial_state:
+            case PauliEigenState.Z_minus:
+                compilers.append(
+                    ApplyGates(
+                        target_nodes=self.code.logical_qubits[0].logical_x.target_nodes,
+                        gates=[PauliChar.X],
+                        tag=f"Init_{self.tag}_logical_pauli",
+                    )
+                )
+            case PauliEigenState.X_minus:
+                compilers.append(
+                    ApplyGates(
+                        target_nodes=self.code.logical_qubits[0].logical_z.target_nodes,
+                        gates=[PauliChar.Z],
+                        tag=f"Init_{self.tag}_logical_pauli",
+                    )
+                )
         return compilers
 
 
