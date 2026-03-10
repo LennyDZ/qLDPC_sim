@@ -1,4 +1,5 @@
 from .ec_code import ErrorCorrectionCode
+from .css_code import CSSCode
 from .surface_code import SurfaceCode
 from .repetition_code import RepetitionCode
 from .rsc3 import RSC3
@@ -9,6 +10,7 @@ from .rotated_surface_code import RotatedSurfaceCode
 
 __all__ = [
     "ErrorCorrectionCode",
+    "CSSCode",
     "SurfaceCode",
     "CSSMixin",
     "LDPCMixin",

@@ -4,10 +4,10 @@ import numpy as np
 from pydantic import Field
 from scipy.sparse import csr_matrix
 
-from .ec_code import ErrorCorrectionCode
+from .css_code import CSSCode
 
 
-class ToricCode(ErrorCorrectionCode):
+class ToricCode(CSSCode):
     """Pydantic toric code model built from lattice distance."""
 
     @staticmethod

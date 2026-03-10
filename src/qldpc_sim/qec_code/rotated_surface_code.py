@@ -4,10 +4,10 @@ import numpy as np
 from pydantic import Field
 from scipy.sparse import csr_matrix
 
-from .ec_code import ErrorCorrectionCode
+from .css_code import CSSCode
 
 
-class RotatedSurfaceCode(ErrorCorrectionCode):
+class RotatedSurfaceCode(CSSCode):
     """Pydantic rotated surface code model built from lattice distance."""
 
     lattice_distance: int = Field(
