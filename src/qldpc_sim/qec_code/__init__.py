@@ -4,6 +4,8 @@ from .repetition_code import RepetitionCode
 from .rsc3 import RSC3
 from .code_property import CSSMixin, LDPCMixin
 from .hgp49_16_3 import HGP_49_16_3
+from .toric_code import ToricCode
+from .rotated_surface_code import RotatedSurfaceCode
 
 __all__ = [
     "ErrorCorrectionCode",
@@ -12,4 +14,6 @@ __all__ = [
     "LDPCMixin",
     "RepetitionCode",
     "RSC3",
+    "ToricCode",
+    "RotatedSurfaceCode",
 ]

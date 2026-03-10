@@ -1,8 +1,13 @@
-from typing import List, Tuple
+from typing import Dict, List, Tuple
 from uuid import UUID, uuid4
+import numpy as np
 from scipy.sparse import csr_matrix
 
 from pydantic import BaseModel, Field, field_validator, model_validator
+
+from qldpc_sim.data_structure.pauli import PauliChar, PauliString
+from qldpc_sim.data_structure.logical_operator import LogicalOperator
+from qldpc_sim.data_structure.tanner_graph import CheckNode, TannerEdge, VariableNode
 from ..data_structure import LogicalQubit, TannerGraph
 
 
@@ -45,6 +50,8 @@ class ErrorCorrectionCode(BaseModel):
 
     @field_validator("n", "k", "d")
     def validate_non_negative_parameters(cls, value):
+        if value is None:
+            return value
         if value < 0:
             raise ValueError("Parameters n, k, and d must be non-negative.")
         return value
@@ -122,6 +129,8 @@ class ErrorCorrectionCode(BaseModel):
         code_name: str,
         simplectic_pcm: csr_matrix,
         logical_qubits: List[Tuple[List[int], List[int]]],
+        var_coordinate: Dict[int, Tuple[int, ...]] = None,
+        check_coordinate: Dict[int, Tuple[int, ...]] = None,
     ) -> "ErrorCorrectionCode":
         """Construct a code from a given parity check matrix and a set of logical qubits.
 
@@ -133,6 +142,8 @@ class ErrorCorrectionCode(BaseModel):
             Parity check matrix in simplectic representation.
         logical_qubits : List[Tuple[List[int], List[int]]]
             List of tuples representing the logical X and Z operators for each logical qubit.
+            Logical operators are represented as binary vectors mapping to the columns
+            of the parity check matrix. If 1 then the qubit is part of the logical operator, if 0 it is not.
 
         Returns
         -------
@@ -159,26 +170,252 @@ class ErrorCorrectionCode(BaseModel):
             min(sum(1 for p in lop[0] if p != 0) for lop in logical_qubits),
             min(sum(1 for p in lop[1] if p != 0) for lop in logical_qubits),
         )
-
-        tg = TannerGraph.from_pcm(simplectic_pcm)
-        logical_qubits_list = []
-        for i, (logical_x, logical_z) in enumerate(logical_qubits):
-            if len(logical_x) != n or len(logical_z) != n:
-                raise ValueError(
-                    "Logical operators must have the same length as the number of physical qubits."
-                )
-            lq = LogicalQubit(
-                name=f"{code_name}_LQ_{i}",
-                logical_x=logical_x,
-                logical_z=logical_z,
+        if var_coordinate is not None and len(var_coordinate) != n:
+            raise ValueError(
+                "Variable coordinate dictionary length must match the number of physical qubits."
             )
-            logical_qubits_list.append(lq)
+        if var_coordinate is not None:
+            var_nodes = [
+                VariableNode(tag=f"v_{i}_{code_name}", coordinates=var_coordinate[i])
+                for i in range(n)
+            ]
+        else:
+            var_nodes = [VariableNode(tag=f"v_{i}_{code_name}") for i in range(n)]
+
+        if check_coordinate is not None and len(check_coordinate) != n_row:
+            raise ValueError(
+                "Check coordinate dictionary length must match the number of checks."
+            )
+
+        logical_qubits_list = []
+        for i, lq in enumerate(logical_qubits):
+            lx_target = []
+            lz_target = []
+            for j in range(n):
+                if lq[0][j] == 1:
+                    lx_target.append(var_nodes[j])
+                if lq[1][j] == 1:
+                    lz_target.append(var_nodes[j])
+            l = LogicalQubit(
+                logical_x=LogicalOperator(
+                    operator=PauliString(string=tuple([PauliChar.X] * len(lx_target))),
+                    target_nodes=tuple(lx_target),
+                    logical_type=PauliChar.X,
+                ),
+                logical_z=LogicalOperator(
+                    operator=PauliString(string=tuple([PauliChar.Z] * len(lz_target))),
+                    target_nodes=tuple(lz_target),
+                    logical_type=PauliChar.Z,
+                ),
+                name=f"{code_name}_lq_{i}",
+            )
+            logical_qubits_list.append(l)
+
+        check_nodes = (
+            [
+                CheckNode(tag=f"c_{i}_{code_name}", coordinates=check_coordinate[i])
+                for i in range(n_row)
+            ]
+            if check_coordinate is not None
+            else [CheckNode(tag=f"c_{i}_{code_name}") for i in range(n_row)]
+        )
+        edges = []
+        for i in range(n_row):
+            for j in range(n):
+                if simplectic_pcm[i, j] == 1:
+                    edges.append(
+                        TannerEdge(
+                            check_node=check_nodes[i],
+                            variable_node=var_nodes[j],
+                            pauli_checked=PauliChar.X,
+                        )
+                    )
+                if simplectic_pcm[i, j + n] == 1:
+                    edges.append(
+                        TannerEdge(
+                            check_node=check_nodes[i],
+                            variable_node=var_nodes[j],
+                            pauli_checked=PauliChar.Z,
+                        )
+                    )
+
+        tanner_graph = TannerGraph(
+            variable_nodes=set(var_nodes),
+            check_nodes=set(check_nodes),
+            edges=set(edges),
+        )
 
         return cls(
             n=n,
             k=k,
             d=d,
             name=code_name,
-            tanner_graph=tg,
+            tanner_graph=tanner_graph,
             logical_qubits=logical_qubits_list,
+            validate_algebraic_properties=False,
+        )
+
+    @classmethod
+    def from_css_pcm(
+        cls,
+        code_name: str,
+        hx: np.ndarray,
+        hz: np.ndarray,
+        logical_qubits: List[Tuple[List[int], List[int]]],
+        var_coordinate: Dict[int, Tuple[int, ...]] = None,
+        check_coordinate: Dict[int, Tuple[int, ...]] = None,
+    ) -> "ErrorCorrectionCode":
+        """Construct a CSS code from separate Hx and Hz parity check matrices.
+
+        Parameters
+        ----------
+        code_name : str
+            Name of the error correction code.
+        hx : np.ndarray
+            X-type parity check matrix (binary).
+        hz : np.ndarray
+            Z-type parity check matrix (binary).
+        logical_qubits : List[Tuple[List[int], List[int]]]
+            List of tuples representing the logical X and Z operators for each logical qubit.
+            Each logical operator is a binary vector mapping to variable node indices.
+        var_coordinate : Dict[int, Tuple[int, ...]], optional
+            Mapping from variable node index to coordinates.
+        check_coordinate : Dict[int, Tuple[int, ...]], optional
+            Mapping from check node index to coordinates.
+
+        Returns
+        -------
+        ErrorCorrectionCode
+            Constructed CSS error correction code instance.
+        """
+        from scipy.sparse import vstack, hstack
+
+        hx = np.asarray(hx, dtype=np.uint8)
+        hz = np.asarray(hz, dtype=np.uint8)
+
+        if hx.shape[1] != hz.shape[1]:
+            raise ValueError(
+                "Hx and Hz must have the same number of columns (physical qubits)."
+            )
+
+        n = hx.shape[1]
+        n_x_checks = hx.shape[0]
+        n_z_checks = hz.shape[0]
+        n_row = n_x_checks + n_z_checks
+        k = len(logical_qubits)
+
+        d = min(
+            min(sum(1 for p in lop[0] if p != 0) for lop in logical_qubits),
+            min(sum(1 for p in lop[1] if p != 0) for lop in logical_qubits),
+        )
+
+        if var_coordinate is not None and len(var_coordinate) != n:
+            raise ValueError(
+                "Variable coordinate dictionary length must match the number of physical qubits."
+            )
+        if var_coordinate is not None:
+            var_nodes = [
+                VariableNode(tag=f"v_{i}_{code_name}", coordinates=var_coordinate[i])
+                for i in range(n)
+            ]
+        else:
+            var_nodes = [VariableNode(tag=f"v_{i}_{code_name}") for i in range(n)]
+
+        # Create logical qubits
+        logical_qubits_list = []
+        for i, lq in enumerate(logical_qubits):
+            lx_target = []
+            lz_target = []
+            for j in range(n):
+                if lq[0][j] == 1:
+                    lx_target.append(var_nodes[j])
+                if lq[1][j] == 1:
+                    lz_target.append(var_nodes[j])
+            l = LogicalQubit(
+                logical_x=LogicalOperator(
+                    operator=PauliString(string=tuple([PauliChar.X] * len(lx_target))),
+                    target_nodes=tuple(lx_target),
+                    logical_type=PauliChar.X,
+                ),
+                logical_z=LogicalOperator(
+                    operator=PauliString(string=tuple([PauliChar.Z] * len(lz_target))),
+                    target_nodes=tuple(lz_target),
+                    logical_type=PauliChar.Z,
+                ),
+                name=f"{code_name}_lq_{i}",
+            )
+            logical_qubits_list.append(l)
+
+        # Create check nodes with appropriate types
+        check_nodes = []
+        check_id_to_node = {}
+
+        # X-type checks from Hx
+        for i in range(n_x_checks):
+            check_coord = check_coordinate[i] if check_coordinate is not None else None
+            check_node = CheckNode(
+                tag=f"c_x_{i}_{code_name}",
+                coordinates=check_coord,
+                check_type=PauliChar.X,
+            )
+            check_nodes.append(check_node)
+            check_id_to_node[i] = check_node
+
+        # Z-type checks from Hz
+        for i in range(n_z_checks):
+            check_coord = (
+                check_coordinate[n_x_checks + i]
+                if check_coordinate is not None
+                else None
+            )
+            check_node = CheckNode(
+                tag=f"c_z_{i}_{code_name}",
+                coordinates=check_coord,
+                check_type=PauliChar.Z,
+            )
+            check_nodes.append(check_node)
+            check_id_to_node[n_x_checks + i] = check_node
+
+        # Build edges
+        edges = []
+
+        # Edges from Hx (X-type checks)
+        for i in range(n_x_checks):
+            for j in range(n):
+                if hx[i, j] == 1:
+                    edges.append(
+                        TannerEdge(
+                            check_node=check_id_to_node[i],
+                            variable_node=var_nodes[j],
+                            pauli_checked=PauliChar.X,
+                        )
+                    )
+
+        # Edges from Hz (Z-type checks)
+        for i in range(n_z_checks):
+            for j in range(n):
+                if hz[i, j] == 1:
+                    edges.append(
+                        TannerEdge(
+                            check_node=check_id_to_node[n_x_checks + i],
+                            variable_node=var_nodes[j],
+                            pauli_checked=PauliChar.Z,
+                        )
+                    )
+
+        # Create Tanner graph
+        tanner_graph = TannerGraph(
+            variable_nodes=set(var_nodes),
+            check_nodes=set(check_nodes),
+            edges=set(edges),
+        )
+
+        return cls(
+            n=n,
+            k=k,
+            d=d,
+            name=code_name,
+            tanner_graph=tanner_graph,
+            logical_qubits=logical_qubits_list,
+            validate_algebraic_properties=False,
         )

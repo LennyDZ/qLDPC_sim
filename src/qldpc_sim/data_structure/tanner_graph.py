@@ -1,4 +1,3 @@
-from enum import Enum
 from functools import cached_property
 from typing import Dict, List, Set, Tuple
 from uuid import UUID, uuid4
@@ -6,7 +5,7 @@ import numpy as np
 from scipy.sparse import csr_matrix
 
 from pydantic.dataclasses import dataclass
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from .pauli import PauliChar
 
@@ -28,6 +27,10 @@ class TannerNode(BaseModel):
         description="Human readable tag (mostly used for debugging)",
         default="",
     )
+    coordinates: Tuple[int, ...] = Field(
+        description="Coordinates of the node in some space (optional, for visualization or geometric codes)",
+        default=(),
+    )
 
 
 class VariableNode(TannerNode):
@@ -39,31 +42,14 @@ class VariableNode(TannerNode):
 class CheckNode(TannerNode):
     """Check node in a Tanner graph."""
 
-    class CheckType(str, Enum):
-        X = "X"
-        Z = "Z"
-        Y = "Y"
-        Undefined = "U"  # Undefined / generic
-        Mixed = "M"  # Mixed type
-
-        def dual(self) -> "CheckNode.CheckType":
-            """Return the dual check type (X <-> Z, Y <-> Y, U <-> U, M <-> M)."""
-            match self:
-                case CheckNode.CheckType.X:
-                    return CheckNode.CheckType.Z
-                case CheckNode.CheckType.Z:
-                    return CheckNode.CheckType.X
-                case CheckNode.CheckType.Y:
-                    return CheckNode.CheckType.Y
-                case CheckNode.CheckType.Undefined:
-                    return CheckNode.CheckType.Undefined
-                case CheckNode.CheckType.Mixed:
-                    return CheckNode.CheckType.Mixed
-
-    check_type: CheckType = Field(
-        description="Type of the check node (X, Z, Y, U)",
-        default=CheckType.Undefined,
+    check_type: PauliChar | None = Field(
+        description="Type of the check node (X, Z, Y) or None when unspecified.",
+        default=None,
     )
+
+    @property
+    def pauli_type(self) -> PauliChar | None:
+        return self.check_type
 
 
 class TannerEdge(BaseModel):
@@ -124,6 +110,17 @@ class TannerGraph(BaseModel):
                     f"Edge check node {edge.check_node.id} not in check nodes."
                 )
         return edges
+
+    @model_validator(mode="after")
+    def validate_check_types(cls, graph: "TannerGraph") -> "TannerGraph":
+        """Validate that any declared check type matches the Pauli type of attached edges."""
+        for edge in graph.edges:
+            declared_pauli = edge.check_node.pauli_type
+            if declared_pauli is not None and edge.pauli_checked != declared_pauli:
+                raise ValueError(
+                    f"Edge with Pauli type {edge.pauli_checked} connected to check node {edge.check_node.id} with declared type {edge.check_node.check_type}."
+                )
+        return graph
 
     @property
     def number_of_nodes(self) -> int:
@@ -243,9 +240,10 @@ class TannerGraph(BaseModel):
             check_node_list,
         )
 
+    @staticmethod
     def from_pcm(Hx: csr_matrix, Hz: csr_matrix, code_name: str = "") -> "TannerGraph":
-        """Constructs a Tanner graph from a given parity-check matrix.
-        This method preserve the order of the columns in the tag of variable nodes.
+        """Constructs a Tanner graph from a given CSS parity-check matrix pairs.
+        This method preserve the order of the columns while tagging the variable nodes.
         Variable nodes are tagged as "v_{column_index}_{code_name}" and check nodes are tagged as "c_{row_index}_{code_name}" for X checks and "c_{row_index + num_X_checks}_{code_name}" for Z checks.
 
         Args:
@@ -276,7 +274,8 @@ class TannerGraph(BaseModel):
         check_nodes.extend(
             [
                 CheckNode(
-                    tag=f"c_{j +x_check_count}_{code_name}", check_type=PauliChar.Z
+                    tag=f"c_{j +x_check_count}_{code_name}",
+                    check_type=PauliChar.Z,
                 )
                 for j in range(z_check_count)
             ]
@@ -315,9 +314,383 @@ class TannerGraph(BaseModel):
             edges=edges,
         )
 
-    def __or__(self, other):
-        if not isinstance(other, TannerGraph):
-            raise ValueError("Can only merge a TannerGraph with another TannerGraph.")
+    def visualize(self, periodic: bool = False):
+        """Plot the TannerGraph, with variable nodes as circles and check nodes as squares. Edges are colored according to the Pauli type they check (e.g. X in red, Z in blue, Y in purple). Node tags are displayed next to the nodes for clarity."""
+        import matplotlib.pyplot as plt
+        from matplotlib.lines import Line2D
+        from matplotlib.patches import ConnectionPatch
+
+        edge_color = {
+            PauliChar.X: "tab:red",
+            PauliChar.Z: "tab:blue",
+            PauliChar.Y: "tab:purple",
+        }
+
+        all_nodes = list(self.variable_nodes) + list(self.check_nodes)
+        if not all_nodes:
+            fig, ax = plt.subplots(figsize=(6, 4))
+            ax.set_title("Empty Tanner Graph")
+            ax.set_axis_off()
+            return fig, ax
+
+        coord_lengths = {len(node.coordinates) for node in all_nodes}
+        if 0 in coord_lengths and len(coord_lengths) > 1:
+            raise ValueError("Either all nodes must have coordinates or none.")
+        if len(coord_lengths) > 1:
+            raise ValueError("All node coordinates must have the same dimension.")
+
+        dim = coord_lengths.pop()
+        if dim not in {0, 2, 3}:
+            raise ValueError("Node coordinates must be empty, 2D, or 3D.")
+
+        def _draw_single_axis(ax, pos):
+            for edge in self.edges:
+                x1, y1 = pos[edge.variable_node]
+                x2, y2 = pos[edge.check_node]
+                ax.plot(
+                    [x1, x2],
+                    [y1, y2],
+                    color=edge_color.get(edge.pauli_checked, "gray"),
+                    linewidth=1.6,
+                    alpha=0.85,
+                    zorder=1,
+                )
+
+            var_nodes = sorted(self.variable_nodes, key=lambda n: n.tag)
+            check_nodes = sorted(self.check_nodes, key=lambda n: n.tag)
+
+            ax.scatter(
+                [pos[n][0] for n in var_nodes],
+                [pos[n][1] for n in var_nodes],
+                marker="o",
+                s=120,
+                color="black",
+                zorder=3,
+                label="Variable",
+            )
+            ax.scatter(
+                [pos[n][0] for n in check_nodes],
+                [pos[n][1] for n in check_nodes],
+                marker="s",
+                s=130,
+                color="dimgray",
+                zorder=3,
+                label="Check",
+            )
+
+            for node in var_nodes + check_nodes:
+                x, y = pos[node]
+                ax.text(x + 0.03, y + 0.03, node.tag, fontsize=8)
+
+            legend_items = [
+                Line2D(
+                    [0], [0], marker="o", linestyle="", color="black", label="Variable"
+                ),
+                Line2D(
+                    [0], [0], marker="s", linestyle="", color="dimgray", label="Check"
+                ),
+                Line2D([0], [0], color="tab:red", label="X edge"),
+                Line2D([0], [0], color="tab:blue", label="Z edge"),
+                Line2D([0], [0], color="tab:purple", label="Y edge"),
+            ]
+            ax.legend(handles=legend_items, loc="best", fontsize=8)
+            ax.set_aspect("equal", adjustable="datalim")
+            ax.grid(alpha=0.12, linewidth=0.6, linestyle=":")
+
+        if dim == 0:
+            fig, ax = plt.subplots(figsize=(9, 5))
+
+            var_nodes = sorted(self.variable_nodes, key=lambda n: n.tag)
+            check_nodes = sorted(self.check_nodes, key=lambda n: n.tag)
+            css_like = all(
+                c.check_type in {PauliChar.X, PauliChar.Z} for c in check_nodes
+            )
+
+            pos = {}
+            for i, node in enumerate(var_nodes):
+                pos[node] = (0.0, float(-i))
+
+            if css_like:
+                x_checks = [c for c in check_nodes if c.check_type == PauliChar.X]
+                z_checks = [c for c in check_nodes if c.check_type == PauliChar.Z]
+                for i, node in enumerate(sorted(x_checks, key=lambda n: n.tag)):
+                    pos[node] = (-1.0, float(-i))
+                for i, node in enumerate(sorted(z_checks, key=lambda n: n.tag)):
+                    pos[node] = (1.0, float(-i))
+            else:
+                for i, node in enumerate(check_nodes):
+                    pos[node] = (1.0, float(-i))
+
+            _draw_single_axis(ax, pos)
+            ax.set_title("Tanner Graph (Bipartite Layout)")
+            return fig, ax
+
+        if dim == 2:
+            fig, ax = plt.subplots(figsize=(8, 6))
+            pos = {
+                node: (node.coordinates[0], node.coordinates[1]) for node in all_nodes
+            }
+            if not periodic:
+                _draw_single_axis(ax, pos)
+                ax.set_title("Tanner Graph (2D Coordinates)")
+                return fig, ax
+
+            # Periodic rendering for toroidal layouts: wrap-across edges are drawn
+            # as two boundary-touching segments so periodic connectivity is explicit.
+            xs = [p[0] for p in pos.values()]
+            ys = [p[1] for p in pos.values()]
+            min_x, max_x = min(xs), max(xs)
+            min_y, max_y = min(ys), max(ys)
+            span_x = (max_x - min_x) + 1
+            span_y = (max_y - min_y) + 1
+            pad = 0.45
+
+            for edge in self.edges:
+                x1, y1 = pos[edge.variable_node]
+                x2, y2 = pos[edge.check_node]
+                color = edge_color.get(edge.pauli_checked, "gray")
+
+                dx = x2 - x1
+                dy = y2 - y1
+                wraps_x = abs(dx) > (span_x / 2)
+                wraps_y = abs(dy) > (span_y / 2)
+
+                if not wraps_x and not wraps_y:
+                    ax.plot(
+                        [x1, x2],
+                        [y1, y2],
+                        color=color,
+                        linewidth=1.6,
+                        alpha=0.85,
+                        zorder=1,
+                    )
+                    continue
+
+                if wraps_x and not wraps_y:
+                    if dx > 0:
+                        ax.plot(
+                            [x1, min_x - pad],
+                            [y1, y1],
+                            color=color,
+                            linewidth=1.6,
+                            alpha=0.85,
+                            zorder=1,
+                        )
+                        ax.plot(
+                            [max_x + pad, x2],
+                            [y2, y2],
+                            color=color,
+                            linewidth=1.6,
+                            alpha=0.85,
+                            zorder=1,
+                        )
+                    else:
+                        ax.plot(
+                            [x1, max_x + pad],
+                            [y1, y1],
+                            color=color,
+                            linewidth=1.6,
+                            alpha=0.85,
+                            zorder=1,
+                        )
+                        ax.plot(
+                            [min_x - pad, x2],
+                            [y2, y2],
+                            color=color,
+                            linewidth=1.6,
+                            alpha=0.85,
+                            zorder=1,
+                        )
+                    continue
+
+                if wraps_y and not wraps_x:
+                    if dy > 0:
+                        ax.plot(
+                            [x1, x1],
+                            [y1, min_y - pad],
+                            color=color,
+                            linewidth=1.6,
+                            alpha=0.85,
+                            zorder=1,
+                        )
+                        ax.plot(
+                            [x2, x2],
+                            [max_y + pad, y2],
+                            color=color,
+                            linewidth=1.6,
+                            alpha=0.85,
+                            zorder=1,
+                        )
+                    else:
+                        ax.plot(
+                            [x1, x1],
+                            [y1, max_y + pad],
+                            color=color,
+                            linewidth=1.6,
+                            alpha=0.85,
+                            zorder=1,
+                        )
+                        ax.plot(
+                            [x2, x2],
+                            [min_y - pad, y2],
+                            color=color,
+                            linewidth=1.6,
+                            alpha=0.85,
+                            zorder=1,
+                        )
+                    continue
+
+                # Fallback for rare diagonal wrap cases.
+                ax.plot(
+                    [x1, x2],
+                    [y1, y2],
+                    color=color,
+                    linewidth=1.2,
+                    alpha=0.6,
+                    zorder=1,
+                    linestyle="--",
+                )
+
+            var_nodes = sorted(self.variable_nodes, key=lambda n: n.tag)
+            check_nodes = sorted(self.check_nodes, key=lambda n: n.tag)
+
+            ax.scatter(
+                [pos[n][0] for n in var_nodes],
+                [pos[n][1] for n in var_nodes],
+                marker="o",
+                s=120,
+                color="black",
+                zorder=3,
+                label="Variable",
+            )
+            ax.scatter(
+                [pos[n][0] for n in check_nodes],
+                [pos[n][1] for n in check_nodes],
+                marker="s",
+                s=130,
+                color="dimgray",
+                zorder=3,
+                label="Check",
+            )
+
+            for node in var_nodes + check_nodes:
+                x, y = pos[node]
+                ax.text(x + 0.03, y + 0.03, node.tag, fontsize=8)
+
+            legend_items = [
+                Line2D(
+                    [0], [0], marker="o", linestyle="", color="black", label="Variable"
+                ),
+                Line2D(
+                    [0], [0], marker="s", linestyle="", color="dimgray", label="Check"
+                ),
+                Line2D([0], [0], color="tab:red", label="X edge"),
+                Line2D([0], [0], color="tab:blue", label="Z edge"),
+                Line2D([0], [0], color="tab:purple", label="Y edge"),
+            ]
+            ax.legend(handles=legend_items, loc="best", fontsize=8)
+            ax.set_aspect("equal", adjustable="datalim")
+            ax.grid(alpha=0.12, linewidth=0.6, linestyle=":")
+            ax.set_xlim(min_x - (pad + 0.15), max_x + (pad + 0.15))
+            ax.set_ylim(min_y - (pad + 0.15), max_y + (pad + 0.15))
+            ax.set_title("Tanner Graph (2D Toroidal Coordinates)")
+            return fig, ax
+
+        planes = sorted({node.coordinates[2] for node in all_nodes})
+        fig, axes = plt.subplots(
+            1,
+            len(planes),
+            figsize=(6 * len(planes), 5),
+            squeeze=False,
+        )
+        axes_list = list(axes[0])
+        plane_to_ax = {plane: axes_list[i] for i, plane in enumerate(planes)}
+
+        pos_2d = {
+            node: (node.coordinates[0], node.coordinates[1]) for node in all_nodes
+        }
+        cross_plane_edges = []
+        for edge in self.edges:
+            p_var = edge.variable_node.coordinates[2]
+            p_chk = edge.check_node.coordinates[2]
+            if p_var == p_chk:
+                ax = plane_to_ax[p_var]
+                x1, y1 = pos_2d[edge.variable_node]
+                x2, y2 = pos_2d[edge.check_node]
+                ax.plot(
+                    [x1, x2],
+                    [y1, y2],
+                    color=edge_color.get(edge.pauli_checked, "gray"),
+                    linewidth=1.6,
+                    alpha=0.85,
+                    zorder=1,
+                )
+            else:
+                cross_plane_edges.append(edge)
+
+        for plane, ax in plane_to_ax.items():
+            plane_var = sorted(
+                [n for n in self.variable_nodes if n.coordinates[2] == plane],
+                key=lambda n: n.tag,
+            )
+            plane_check = sorted(
+                [n for n in self.check_nodes if n.coordinates[2] == plane],
+                key=lambda n: n.tag,
+            )
+
+            if plane_var:
+                ax.scatter(
+                    [pos_2d[n][0] for n in plane_var],
+                    [pos_2d[n][1] for n in plane_var],
+                    marker="o",
+                    s=120,
+                    color="black",
+                    zorder=3,
+                )
+            if plane_check:
+                ax.scatter(
+                    [pos_2d[n][0] for n in plane_check],
+                    [pos_2d[n][1] for n in plane_check],
+                    marker="s",
+                    s=130,
+                    color="dimgray",
+                    zorder=3,
+                )
+
+            for node in plane_var + plane_check:
+                x, y = pos_2d[node]
+                ax.text(x + 0.03, y + 0.03, node.tag, fontsize=8)
+
+            ax.set_title(f"Plane {plane}")
+            ax.set_aspect("equal", adjustable="datalim")
+            ax.grid(alpha=0.12, linewidth=0.6, linestyle=":")
+
+        for edge in cross_plane_edges:
+            x1, y1 = pos_2d[edge.variable_node]
+            x2, y2 = pos_2d[edge.check_node]
+            a1 = plane_to_ax[edge.variable_node.coordinates[2]]
+            a2 = plane_to_ax[edge.check_node.coordinates[2]]
+            connector = ConnectionPatch(
+                xyA=(x1, y1),
+                xyB=(x2, y2),
+                coordsA="data",
+                coordsB="data",
+                axesA=a1,
+                axesB=a2,
+                color=edge_color.get(edge.pauli_checked, "gray"),
+                linestyle="--",
+                linewidth=1.1,
+                alpha=0.7,
+            )
+            fig.add_artist(connector)
+
+        fig.suptitle("Tanner Graph (3D Coordinates by Plane)")
+        fig.tight_layout()
+        return fig, axes_list
+
+    def __or__(self, other: "TannerGraph") -> "TannerGraph":
+        """Returns the union of two Tanner graphs. The resulting Tanner graph contains all variable nodes, check nodes, and edges from both graphs. If there are overlapping nodes or edges (i.e. nodes or edges with the same id), they are merged into a single node or edge in the resulting graph."""
+
         joined_variable_nodes = self.variable_nodes.union(other.variable_nodes)
         joined_check_nodes = self.check_nodes.union(other.check_nodes)
         joined_edges = self.edges.union(other.edges)
@@ -343,6 +716,7 @@ class TannerGraph(BaseModel):
         return True
 
     def __contains__(self, item: TannerNode | TannerEdge) -> bool:
+        """Check if a node or edge is in the Tanner graph."""
         if isinstance(item, VariableNode):
             return item in self.variable_nodes
         elif isinstance(item, CheckNode):
@@ -352,8 +726,8 @@ class TannerGraph(BaseModel):
         else:
             raise ValueError("Item must be a VariableNode, CheckNode, or TannerEdge.")
 
-    def is_disjoint(self, other) -> bool:
-        """Returns True if the Tanner graph is disjoint with another Tanner graph."""
+    def is_disjoint(self, other: "TannerGraph") -> bool:
+        """Returns True if the Tanner graph is disjoint with another Tanner graph. Meaning they do not share any node (based on node id)."""
         if not isinstance(other, TannerGraph):
             raise ValueError("Can only check disjointness with another TannerGraph.")
         return self.variable_nodes.isdisjoint(

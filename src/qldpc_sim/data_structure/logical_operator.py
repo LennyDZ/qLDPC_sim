@@ -20,10 +20,24 @@ class LogicalOperator(BaseModel):
     model_config = ConfigDict(frozen=True)  # Immutable after creation
     id: UUID = Field(default_factory=uuid4, init=False)
     logical_type: PauliChar
-    operator: PauliString
+    operator: PauliString = Field(
+        default=PauliString(string=()),
+        description="The Pauli string representing the physical implementation of the logical operator (each element of the string applies to a corresponding variable node in the target_nodes tuple).",
+    )
     target_nodes: Tuple[
         VariableNode, ...
     ]  # Tuple of variable nodes the operator acts on.
+
+    @model_validator(mode="after")
+    def default_operator(self) -> "LogicalOperator":
+        """If operator is not provided, create a default Pauli string of the correct length based on the logical type."""
+        if not self.operator.string:
+            object.__setattr__(
+                self,
+                "operator",
+                PauliString(string=tuple(self.logical_type for _ in self.target_nodes)),
+            )
+        return self
 
     @model_validator(mode="after")
     def ensure_length_match(self) -> "LogicalOperator":

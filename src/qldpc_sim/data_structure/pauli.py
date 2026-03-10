@@ -4,7 +4,7 @@ from pydantic.dataclasses import dataclass
 from enum import Enum
 
 
-class PauliChar(Enum):
+class PauliChar(str, Enum):
     """Enum representing the single-qubit Pauli operators."""
 
     X = "X"

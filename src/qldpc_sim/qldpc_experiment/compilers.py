@@ -205,7 +205,7 @@ class StabilisersMeasurementCompiler(Compiler):
                             f"CY {memory.allocation[check.id]}, {memory.allocation[dq.id]}"
                         )
                     base_stim_instructions.append(f"H {memory.allocation[check.id]}")
-                case "Mixed":
+                case None:
                     edge = self.data.index_by_check(check)
                     for e in edge:
                         dq = e.variable_node

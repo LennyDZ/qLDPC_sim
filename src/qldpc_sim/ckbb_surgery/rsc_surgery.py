@@ -124,10 +124,10 @@ class SurgeMeasurement(PauliMeasurement):
         basis = self.logical_targets[0].logical_type
 
         if basis == PauliChar.X:
-            check_type = CheckNode.CheckType.X
+            check_type = PauliChar.X
             var_node_initial_state = PauliEigenState.Z_plus
         elif basis == PauliChar.Z:
-            check_type = CheckNode.CheckType.Z
+            check_type = PauliChar.Z
             var_node_initial_state = PauliEigenState.X_plus
         else:
             raise ValueError("Only X and Z measurement are supported for now.")

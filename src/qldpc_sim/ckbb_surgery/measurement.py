@@ -160,13 +160,13 @@ class CKBBMeasurement(PauliMeasurement):
                 ):
                     # Check if any element of the opposite logical operator is measured by the ancilla system's stabilisers.
                     for lqb in code.logical_qubits:
-                        if p2.check_type == CheckNode.CheckType.X:
+                        if p2.check_type == PauliChar.X:
                             if p1 in lqb.logical_z.target_nodes:
                                 print(
                                     f"Check {p2} anticommutes with logical operator {lqb.logical_z} because of node {p1}"
                                 )
                                 check_anticommuting_with_lop[lqb.logical_z].add(p2)
-                        if p2.check_type == CheckNode.CheckType.Z:
+                        if p2.check_type == PauliChar.Z:
                             if p1 in lqb.logical_x.target_nodes:
                                 print(
                                     f"Check {p2} anticommutes with logical operator {lqb.logical_x} because of node {p1}"
@@ -202,10 +202,10 @@ class CKBBMeasurement(PauliMeasurement):
         basis = self.logical_targets[0].logical_type
 
         if basis == PauliChar.X:
-            check_type = CheckNode.CheckType.X
+            check_type = PauliChar.X
             var_node_initial_state = PauliEigenState.Z_plus
         elif basis == PauliChar.Z:
-            check_type = CheckNode.CheckType.Z
+            check_type = PauliChar.Z
             var_node_initial_state = PauliEigenState.X_plus
         else:
             raise ValueError("Only X and Z measurement are supported for now.")

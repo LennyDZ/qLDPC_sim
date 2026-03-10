@@ -1,37 +1,106 @@
-from pydantic import Field, model_validator
-from scipy.sparse import lil_matrix
+from typing import Dict, List, Tuple
 
-from qldpc_sim.data_structure.tanner_graph import (
-    CheckNode,
-    TannerEdge,
-    TannerGraph,
-    VariableNode,
-    VariableNode,
-)
+import numpy as np
+from pydantic import Field
+from scipy.sparse import csr_matrix
+
 from .ec_code import ErrorCorrectionCode
-from .code_property import CSSMixin, LDPCMixin
 
 
-def surface_code_pcm(d: int) -> None:
-    """Generates the parity-check matrix for a surface code of distance d."""
-    # Implementation to generate the PCM for surface code
-    pass
+class SurfaceCode(ErrorCorrectionCode):
+    """Pydantic planar surface code model built from lattice distance."""
 
+    lattice_distance: int = Field(
+        default=None,
+        description="Distance used to generate this surface code instance.",
+    )
 
-class SurfaceCode(CSSMixin, LDPCMixin, ErrorCorrectionCode):
-    tanner_graph: TannerGraph = Field(init=False)
+    @staticmethod
+    def _build_css_pcm(
+        distance: int,
+    ) -> Tuple[
+        np.ndarray, np.ndarray, Dict[int, Tuple[int, int]], Dict[int, Tuple[int, int]]
+    ]:
+        if distance < 2:
+            raise ValueError("distance must be >= 2")
 
-    @model_validator(mode="after")
-    def validate_code_params(self) -> "SurfaceCode":
-        if not self.n:
-            self.n = self.d**2 + (self.d - 1) ** 2
-        if self.n != (self.d**2 + (self.d - 1) ** 2):
-            raise ValueError("For surface codes, n must be equal to d squared.")
-        # if self.k != 1:
-        #     raise ValueError("For surface codes, k must be equal to 1.")
-        return self
+        d = distance
+        L = 2 * d - 1
 
-    @model_validator(mode="after")
-    def build_tanner_graph(self) -> "SurfaceCode":
-        # Build the Tanner graph from the parity-check matrix
-        return self
+        data_coords: List[Tuple[int, int]] = []
+        data_index: Dict[Tuple[int, int], int] = {}
+        x_checks: List[Tuple[int, int]] = []
+        z_checks: List[Tuple[int, int]] = []
+
+        # Checkerboard embedding with open boundaries.
+        # Data qubits at all four corners: (r+c) % 2 == 0
+        # X-checks at (r odd, c even), Z-checks at (r even, c odd)
+        # Top/bottom boundaries are smooth (no X-checks), left/right are rough (X-checks present).
+        for r in range(L):
+            for c in range(L):
+                if (r + c) % 2 == 0:
+                    data_index[(r, c)] = len(data_coords)
+                    data_coords.append((r, c))
+                elif r % 2 == 1 and c % 2 == 0:
+                    # X-checks at odd rows (rough boundaries on left/right)
+                    x_checks.append((r, c))
+                elif r % 2 == 0 and c % 2 == 1:
+                    # Z-checks at even rows (smooth boundaries on top/bottom)
+                    z_checks.append((r, c))
+
+        n = len(data_coords)
+        hx = np.zeros((len(x_checks), n), dtype=np.uint8)
+        hz = np.zeros((len(z_checks), n), dtype=np.uint8)
+
+        def neighbors_open(r: int, c: int) -> List[Tuple[int, int]]:
+            candidates = [(r, c - 1), (r, c + 1), (r - 1, c), (r + 1, c)]
+            return [q for q in candidates if q in data_index]
+
+        for row, (r, c) in enumerate(x_checks):
+            for q in neighbors_open(r, c):
+                hx[row, data_index[q]] = 1
+
+        for row, (r, c) in enumerate(z_checks):
+            for q in neighbors_open(r, c):
+                hz[row, data_index[q]] = 1
+
+        var_coordinate = {i: coord for i, coord in enumerate(data_coords)}
+        all_checks = x_checks + z_checks
+        check_coordinate = {i: coord for i, coord in enumerate(all_checks)}
+
+        return hx, hz, var_coordinate, check_coordinate
+
+    @staticmethod
+    def _build_default_logicals(
+        distance: int, var_coordinate: Dict[int, Tuple[int, int]]
+    ) -> List[Tuple[List[int], List[int]]]:
+        n = len(var_coordinate)
+
+        boundary_left = [0] * n  # Z logical: connects left (rough) to right (rough)
+        boundary_top = [0] * n  # X logical: connects top (smooth) to bottom (smooth)
+
+        for i, (r, c) in var_coordinate.items():
+            # Z logical: data qubits on the left boundary (c=0, r even)
+            if c == 0 and r % 2 == 0:
+                boundary_left[i] = 1
+            # X logical: data qubits on the top boundary (r=0, c even)
+            if r == 0 and c % 2 == 0:
+                boundary_top[i] = 1
+
+        # One logical qubit for planar surface code.
+        # Return as (X, Z) where X is on top/bottom (smooth) and Z is on left/right (rough)
+        return [(boundary_top, boundary_left)]
+
+    @classmethod
+    def from_distance(cls, distance: int, code_name: str = "surface") -> "SurfaceCode":
+        hx, hz, var_coordinate, check_coordinate = cls._build_css_pcm(distance)
+        logical_qubits = cls._build_default_logicals(distance, var_coordinate)
+        code = cls.from_css_pcm(
+            code_name=code_name,
+            hx=hx,
+            hz=hz,
+            logical_qubits=logical_qubits,
+            var_coordinate=var_coordinate,
+            check_coordinate=check_coordinate,
+        )
+        return code.model_copy(update={"lattice_distance": distance})

@@ -101,12 +101,12 @@ class InitializeCode(CodeGadget):
                 f"z_stabs_{self.tag}": {
                     n
                     for n in self.code.tanner_graph.check_nodes
-                    if n.check_type == CheckNode.CheckType.Z
+                    if n.check_type == PauliChar.Z
                 },
                 f"x_stabs_{self.tag}": {
                     n
                     for n in self.code.tanner_graph.check_nodes
-                    if n.check_type == CheckNode.CheckType.X
+                    if n.check_type == PauliChar.X
                 },
             },
         )

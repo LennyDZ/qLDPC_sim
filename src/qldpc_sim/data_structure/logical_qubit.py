@@ -22,11 +22,9 @@ class LogicalQubit(BaseModel):
     name: str = Field(description="Name of the logical qubit")
 
     logical_x: LogicalOperator = Field(
-        default_factory=tuple,
         description="Logical X operator associated with the logical qubit",
     )
 
     logical_z: LogicalOperator = Field(
-        default_factory=tuple,
         description="Logical Z operator associated with the logical qubit",
     )
