@@ -1,16 +1,15 @@
-from collections import defaultdict
+
 from functools import cached_property
-from typing import Dict, List, Set, Tuple
-from pydantic import BaseModel, ConfigDict
+from typing import Dict
+from qldpc_sim.qec_code.rotated_surface_code import RotatedSurfaceCode
+from qldpc_sim.qldpc_experiment.record import EventType, OutcomeSet
 
 from ..data_structure import (
     TannerGraph,
     LogicalOperator,
     CheckNode,
     TannerEdge,
-    TannerNode,
     VariableNode,
-    PauliEigenState,
     PauliChar,
 )
 from ..data_structure import TannerGraphAlgebra as tga
@@ -20,13 +19,6 @@ from ..qldpc_experiment import (
     MeasurementCompiler,
     StabilisersMeasurementCompiler,
 )
-
-
-class SurgeJoint(BaseModel):
-    model_config = ConfigDict(frozen=True)
-    check_type: PauliChar
-    stack: List[TannerNode]
-
 
 class SurgeMeasurement(PauliMeasurement):
 
@@ -63,8 +55,16 @@ class SurgeMeasurement(PauliMeasurement):
         return tanners
 
     def check_feasibility(self):
-        # Implement feasibility checks specific to Measurement
-        # Check if operators are disjoint or not, etc.
+        if len(self.logical_targets) != 2:
+            raise ValueError(
+                "Only two logical operators can be measured together in a lattice surgery measurement for now."
+            )
+        c1 = self.context.initial_assignement[self.logical_targets[0]]
+        c2 = self.context.initial_assignement[self.logical_targets[1]]
+        if not isinstance(c1, RotatedSurfaceCode) or not isinstance(c2, RotatedSurfaceCode):
+                raise ValueError(
+                    "Error in building measurement: lattice surgery only works with instance of RotatedSurfaceCode."
+                )
         return True
 
     def cost(self):
@@ -73,6 +73,7 @@ class SurgeMeasurement(PauliMeasurement):
 
     def build_compiler_instructions(self):
         compilers = []
+        basis = self.logical_targets[0].logical_type
         # I. Evalute feasability, cost
         if not self.check_feasibility():
             raise ValueError(
@@ -80,183 +81,156 @@ class SurgeMeasurement(PauliMeasurement):
             )
         # II. Build ancilla TannerGraphs
         lop_tanners = self.tanner_supports
-        tanner_codes = TannerGraph()  # Sum of tanner of codes involved (disconnected)
+        tanners = list(lop_tanners.values())
 
-        joints = []
-        for k, v in lop_tanners.items():
-            vn = sorted(v.variable_nodes, key=lambda n: n.tag)
-            bot = vn[0]
+        # Compute classical correction of logicals that commute with the supports used.
+        anticommuting_lop_by_node = {}
+        corrections = {}
+        for lop in self.logical_targets:
+            code = self.context.initial_assignement[lop]
+            for lq in code.logical_qubits:
+                if lq.logical_x == lop or lq.logical_z == lop:
+                    shared_target_nodes = set(lq.logical_x.target_nodes) & set(
+                        lq.logical_z.target_nodes
+                    )
+                    if len(shared_target_nodes) > 1:
+                        raise ValueError(
+                            "Error in building measurement: a logical operator share more than 1 qubit with its anticommuting logical operator, this is not supported for now. Try finding a canonical basis for the code."
+                        )
+                    anticommuting_lop_by_node[shared_target_nodes.pop()] = (
+                        lq.logical_x if lq.logical_z == lop else lq.logical_z
+                    )
+                    break
 
-            if len(v.index_by_variable[bot]) != 1:
-                bot = vn[1]
-            stack = [bot]
-            p = bot
-            pc = None
-            for i in range(1, self.distance - 1):
-                nc = [
-                    check for check in v.index_by_variable[p] if check.check_node != pc
-                ][0].check_node
-                stack.append(nc)
-                nv = [var for var in v.index_by_check[nc] if var.variable_node != p]
-                nv = nv[0].variable_node
-                stack.append(nv)
+        new_nodes = set()
+        new_edges = set()
+        for i in range(self.distance):
+            new_nodes.add(VariableNode(tag=f"rsc_surge_anc_{i}", coordinates=(0, 2*i, 1, 0)))
+        for i in range(self.distance + 1):
+            new_nodes.add(CheckNode(tag=f"rsc_surge_check_{i}", coordinates=((-1)**i, 2*i-1, 1, 0), check_type=basis))
 
-                p = nv
-                pc = nc
-            joint = SurgeJoint(
-                check_type=pc.check_type,
-                stack=stack,
-            )
-            joints.append(joint)
+        map_new_nodes = {n.coordinates[1]: n for n in new_nodes}
+        map_new_nodes_reverse = {self.distance*2-2-k: v for k, v in map_new_nodes.items()}
+        for i, n in map_new_nodes.items():
+            if isinstance(n, VariableNode):
+                check_n_above = map_new_nodes[i+1]
+                check_n_below = map_new_nodes[i-1]
+                new_edges.add(TannerEdge(variable_node=n, check_node=check_n_above, pauli_checked=check_n_above.check_type))
+                new_edges.add(TannerEdge(variable_node=n, check_node=check_n_below, pauli_checked=check_n_below.check_type))
 
-        connecting_edges = []
-        check_anticommuting_with_lop = defaultdict(set)
+        anc_tanner = TannerGraph(
+            variable_nodes=[n for n in new_nodes if isinstance(n, VariableNode)],
+            check_nodes=[n for n in new_nodes if isinstance(n, CheckNode)],
+            edges=new_edges,
+        )
+        connecting_edges = set()
+        for idx, supp in enumerate(tanners):
+            check = sorted(list(supp.check_nodes), key=lambda n: n.coordinates[:2])
+            var = sorted(list(supp.variable_nodes), key=lambda n: n.coordinates[:2])
+            if idx == 1:
+                map_new_nodes = map_new_nodes_reverse
+            varying_idx = 0 if var[0].coordinates[0] != var[-1].coordinates[0] else 1
+            
+            for c in check:
+                i = c.coordinates[varying_idx]
+                if c.coordinates[(varying_idx+1)%2] == 1:
+                    if c.coordinates[varying_idx] == 1:
+                        variant = True
+                    continue
+                if c.coordinates[(varying_idx+1)%2] == 2*(self.distance-1)-1:
+                    continue
+                if i>-1:
+                    new_edge = TannerEdge(variable_node=map_new_nodes[i-1], check_node=c, pauli_checked=c.check_type)
+                    connecting_edges.add(new_edge)
+                if i<len(map_new_nodes)-1:
+                    new_edge = TannerEdge(variable_node=map_new_nodes[i+1], check_node=c, pauli_checked=c.check_type)
+                    connecting_edges.add(new_edge)
+            for v in var:
+                i = v.coordinates[varying_idx]
+                if i %4== 0:
+                    if varying_idx == 0:
+                        c = map_new_nodes[i+1]
+                    else:
+                        c = map_new_nodes[i-1]
+                else:
+                    if varying_idx == 0:
+                        c = map_new_nodes[i-1]
+                    else:
+                        c = map_new_nodes[i+1]
+                new_edge = TannerEdge(variable_node=v, check_node=c, pauli_checked=c.check_type)
+                
+                connecting_edges.add(new_edge)
+
+        
 
         c1 = self.context.initial_assignement[self.logical_targets[0]].tanner_graph
         c2 = self.context.initial_assignement[self.logical_targets[1]].tanner_graph
-
-        bridge_tanner, bridge_edges = self._build_bridge_tanner((joints[0], joints[1]))
-        tanner_codes = c1 | c2
-        merged_tanner = tga.connect(
-            bridge_tanner, tanner_codes, connecting_edges=bridge_edges
-        )
-        # V. Build compiler
-        basis = self.logical_targets[0].logical_type
-
-        if basis == PauliChar.X:
-            check_type = PauliChar.X
-            var_node_initial_state = PauliEigenState.Z_plus
-        elif basis == PauliChar.Z:
-            check_type = PauliChar.Z
-            var_node_initial_state = PauliEigenState.X_plus
-        else:
-            raise ValueError("Only X and Z measurement are supported for now.")
+        merged_tanner = tga.connect(c1 | c2, anc_tanner, connecting_edges=connecting_edges)
+        tga.visualize(merged_tanner, highlight_nodes=self.logical_targets[0].target_nodes)
+        
 
         init_ancilla = [
             ApplyGates(
                 tag=f"init_{self.tag}",
-                target_nodes=bridge_tanner.variable_nodes,
-                gates=var_node_initial_state.pauli_from_zero(),
+                target_nodes=anc_tanner.variable_nodes,
+                gates=["RX"] if basis.dual() == PauliChar.X else ["RZ"],
             ),
         ]
-        observable_nodes = {
-            "XX_outcome": set(
-                [n for n in bridge_tanner.check_nodes if n.check_type == check_type]
-            ),
-            "middle_X": set(
-                [
-                    n
-                    for n in bridge_tanner.check_nodes
-                    if len(bridge_tanner.index_by_check[n]) == 2
-                ]
-            ),
-            "all_ancilla_checks": bridge_tanner.check_nodes,
-            "all_code_checks": merged_tanner.check_nodes,
-        }
-
-        i = 0
-        for k, v in check_anticommuting_with_lop.items():
-            i += 1
-            observable_nodes[f"anticommute_with_{i}"] = v
-
+        stab_measurement = StabilisersMeasurementCompiler(
+            data=merged_tanner,
+            round=self.distance,
+            tag=f"ckbb_{self.tag}",
+        )
         stab_measurement = StabilisersMeasurementCompiler(
             data=merged_tanner,
             round=self.distance,
             tag=f"merged_stab_{self.tag}",
-            observable_included=observable_nodes,
         )
 
         readout_ancilla = MeasurementCompiler(
-            data=bridge_tanner,
+            data=TannerGraph(variable_nodes=anc_tanner.variable_nodes, check_nodes=set(), edges=set()),
             tag=f"readout_bridge_ancilla_{self.tag}",
             reset_qubits=True,
             free_qubits=True,
+            basis=basis.dual(),
         )
         compilers.extend(init_ancilla)
         compilers.append(stab_measurement)
-
         compilers.append(readout_ancilla)
-        return compilers
 
-    def _build_bridge_tanner(
-        self, bridge_ends: tuple[SurgeJoint, SurgeJoint]
-    ) -> Tuple[TannerEdge, Set[TannerEdge]]:
-        connecting_edges = set()
-        bridge_edges = set()
-        var_nodes = set()
-        check_nodes = set()
-        # joint are of the same type (easy case)
-        if bridge_ends[0].check_type == bridge_ends[1].check_type:
-            c_type = bridge_ends[0].check_type
-            prev_layer_node = None
-            # iter nodes connected to the bridge (at each layer)
-            for i, (s1, s2) in enumerate(
-                zip(bridge_ends[0].stack, bridge_ends[1].stack)
-            ):
-                if isinstance(s1, VariableNode) and isinstance(s2, VariableNode):
-                    check_type = c_type.dual()
-                    new_check = CheckNode(
-                        tag=f"bridge_{check_type}_check_l{i}",
-                        check_type=check_type,
-                    )
-                    edge1 = TannerEdge(
-                        variable_node=s1,
-                        check_node=new_check,
-                        pauli_checked=check_type,
-                    )
-                    edge2 = TannerEdge(
-                        variable_node=s2,
-                        check_node=new_check,
-                        pauli_checked=check_type,
-                    )
-                    if i > 0:
-                        edge_with_prev_layer = TannerEdge(
-                            variable_node=prev_layer_node,
-                            check_node=new_check,
-                            pauli_checked=check_type,
-                        )
-                        bridge_edges.add(edge_with_prev_layer)
-                    prev_layer_node = new_check
-                    connecting_edges.add(edge1)
-                    connecting_edges.add(edge2)
-                    check_nodes.add(new_check)
-
-                elif isinstance(s1, CheckNode) and isinstance(s2, CheckNode):
-                    c_type = s1.check_type
-                    new_variable = VariableNode(
-                        tag=f"bridge_var_l{i}",
-                    )
-                    edge1 = TannerEdge(
-                        variable_node=new_variable,
-                        check_node=s1,
-                        pauli_checked=c_type,
-                    )
-                    edge2 = TannerEdge(
-                        variable_node=new_variable,
-                        check_node=s2,
-                        pauli_checked=c_type,
-                    )
-                    if i > 0:
-                        edge_with_prev_layer = TannerEdge(
-                            variable_node=new_variable,
-                            check_node=prev_layer_node,
-                            pauli_checked=c_type.dual(),
-                        )
-                        bridge_edges.add(edge_with_prev_layer)
-                    prev_layer_node = new_variable
-                    connecting_edges.add(edge1)
-                    connecting_edges.add(edge2)
-                    var_nodes.add(new_variable)
-                else:
-                    raise ValueError(
-                        "Error in building bridge Tanner: joint stacks are inconsistent."
-                    )
-        else:
-            raise ValueError("Only bridge between same check types are supported yet.")
-
-        return (
-            TannerGraph(
-                variable_nodes=var_nodes, check_nodes=check_nodes, edges=bridge_edges
-            ),
-            connecting_edges,
+        outcomes = []
+        stab_in_parity = set(
+            [n for n in anc_tanner.check_nodes if n.check_type == basis]
         )
+        parity_outcome_nodes = OutcomeSet(
+            tag=f"{self.tag}_parity_outcome",
+            type=EventType.OBSERVABLE,
+            size=len(stab_in_parity),
+            measured_nodes=stab_in_parity,
+            target=self.logical_targets,
+        )
+        
+        outcomes.append(parity_outcome_nodes)
+        correct_targ = self.logical_targets[0]
+        targ_op = None
+        code = self.context.initial_assignement[correct_targ]
+        for lq in code.logical_qubits:
+            if lq.logical_x == correct_targ:
+                targ_op = lq.logical_z
+            elif lq.logical_z == correct_targ:
+                targ_op = lq.logical_x
+        correction = {n for n in anc_tanner.variable_nodes}
+        
+
+        if targ_op is not None:
+            outcomes.append(
+                OutcomeSet(
+                    tag=f"{self.tag}log_corr_{correct_targ.id}",
+                    type=EventType.FRAME_CORRECTION,
+                    size=len(correction),
+                    measured_nodes=correction,
+                    target=targ_op,
+                )
+            )
+        return compilers, outcomes
+

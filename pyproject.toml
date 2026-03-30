@@ -1,5 +1,5 @@
 [project]
-name = "qldpc-sim"
+name = "QEC-compiler"
 version = "0.1.0"
 description = "Package to generate Stim codes for qLDPC surgery."
 readme = "README.md"
@@ -14,7 +14,7 @@ test = ["pytest>=7.0", "pytest-cov>=4.0"]
 dev = ["pytest>=7.0", "pytest-cov>=4.0", "black>=23.0", "ruff>=0.1.0"]
 
 [project.scripts]
-qldpc-sim = "qldpc_sim:main"
+qec-compiler = "qldpc_sim:main"
 
 [build-system]
 requires = ["uv_build>=0.9.26,<0.10.0"]
